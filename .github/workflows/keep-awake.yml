@@ -20,4 +20,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping health endpoint
-        run: curl -sf https://your-backend-url.onrender.com/health || true
+        run: curl -sf https://dashboard-backend-s8a2.onrender.com/health || true
