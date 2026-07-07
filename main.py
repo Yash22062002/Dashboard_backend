@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from collections import defaultdict
@@ -7,6 +8,7 @@ import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 load_dotenv()  # reads the .env file in this folder, if one exists
@@ -34,8 +36,10 @@ app.add_middleware(
 SYSTEM_PROMPT = (
     "You are a helpful assistant embedded in Yash Patel's bioinformatics "
     "portfolio website. Answer questions about his skills, projects, and "
-    "background using a friendly, concise tone. If you do not know an "
-    "answer, say so plainly instead of guessing."
+    "background using a friendly, concise tone. Markdown formatting such as "
+    "bold text and bullet points is fine, it will render correctly. Keep "
+    "replies focused, a short paragraph or a brief list is usually enough. "
+    "If you do not know an answer, say so plainly instead of guessing."
 )
 
 
@@ -46,10 +50,6 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
-
-
-class ChatResponse(BaseModel):
-    reply: str
 
 
 # Small in memory rate limiter, per process, per visitor IP. This is fine
@@ -72,7 +72,7 @@ def check_rate_limit(ip: str):
     _hits[ip].append(now)
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 async def chat(payload: ChatRequest, request: Request):
     client_ip = request.client.host if request.client else "unknown"
     check_rate_limit(client_ip)
@@ -80,20 +80,22 @@ async def chat(payload: ChatRequest, request: Request):
     if not payload.messages:
         raise HTTPException(status_code=400, detail="messages cannot be empty")
 
-    try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": m.role, "content": m.content} for m in payload.messages],
-        )
-        reply_text = "".join(
-            block.text for block in response.content if block.type == "text"
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Upstream error: {exc}") from exc
+    anthropic_messages = [{"role": m.role, "content": m.content} for m in payload.messages]
 
-    return ChatResponse(reply=reply_text)
+    def event_stream():
+        try:
+            with client.messages.stream(
+                model=MODEL,
+                max_tokens=500,
+                system=SYSTEM_PROMPT,
+                messages=anthropic_messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/health")
