@@ -121,9 +121,17 @@ async def chat(payload: ChatRequest, request: Request):
         try:
             stream = client.chat.completions.create(
                 model=MODEL,
-                max_tokens=500,
+                max_tokens=900,
                 messages=chat_messages,
                 stream=True,
+                # Reasoning genuinely helps on multi part questions like a
+                # fit assessment, so it stays on. The model puts that
+                # reasoning in its own separate field, and the loop below
+                # only ever reads delta.content, the finished answer, so
+                # none of the scratch work ever reaches the visitor. The
+                # higher max_tokens makes sure reasoning has room to
+                # happen without crowding out the actual visible reply.
+                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
             )
             for chunk in stream:
                 if not chunk.choices:
