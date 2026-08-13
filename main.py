@@ -4,26 +4,23 @@ import time
 from collections import defaultdict
 from typing import List
 
+import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from openai import OpenAI
 from pydantic import BaseModel
 
 load_dotenv()  # reads the .env file in this folder, if one exists
 
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost:5173")
-MODEL = os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
-if not NVIDIA_API_KEY:
-    raise RuntimeError("NVIDIA_API_KEY environment variable is not set.")
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
 
-# NVIDIA's hosted catalog speaks the same request format as OpenAI, so the
-# official openai package works here too, just pointed at NVIDIA's address
-# instead of OpenAI's own, with your NVIDIA key in place of an OpenAI key.
-client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY)
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 app = FastAPI(title="Portfolio chat backend")
 
@@ -110,35 +107,18 @@ async def chat(payload: ChatRequest, request: Request):
     if not payload.messages:
         raise HTTPException(status_code=400, detail="messages cannot be empty")
 
-    # NVIDIA's endpoint follows the OpenAI convention of putting the system
-    # prompt as the first message in the list, rather than a separate top
-    # level parameter the way Anthropic's API expects it.
-    chat_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
-        {"role": m.role, "content": m.content} for m in payload.messages
-    ]
+    anthropic_messages = [{"role": m.role, "content": m.content} for m in payload.messages]
 
     def event_stream():
         try:
-            stream = client.chat.completions.create(
+            with client.messages.stream(
                 model=MODEL,
-                max_tokens=900,
-                messages=chat_messages,
-                stream=True,
-                # Reasoning genuinely helps on multi part questions like a
-                # fit assessment, so it stays on. The model puts that
-                # reasoning in its own separate field, and the loop below
-                # only ever reads delta.content, the finished answer, so
-                # none of the scratch work ever reaches the visitor. The
-                # higher max_tokens makes sure reasoning has room to
-                # happen without crowding out the actual visible reply.
-                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
-            )
-            for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    yield f"data: {json.dumps({'text': delta})}\n\n"
+                max_tokens=500,
+                system=SYSTEM_PROMPT,
+                messages=anthropic_messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    yield f"data: {json.dumps({'text': text})}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
