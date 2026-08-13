@@ -4,23 +4,26 @@ import time
 from collections import defaultdict
 from typing import List
 
-import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from openai import OpenAI
 from pydantic import BaseModel
 
 load_dotenv()  # reads the .env file in this folder, if one exists
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost:5173")
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+MODEL = os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 
-if not ANTHROPIC_API_KEY:
-    raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
+if not NVIDIA_API_KEY:
+    raise RuntimeError("NVIDIA_API_KEY environment variable is not set.")
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# NVIDIA's hosted catalog speaks the same request format as OpenAI, so the
+# official openai package works here too, just pointed at NVIDIA's address
+# instead of OpenAI's own, with your NVIDIA key in place of an OpenAI key.
+client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY)
 
 app = FastAPI(title="Portfolio chat backend")
 
@@ -107,18 +110,27 @@ async def chat(payload: ChatRequest, request: Request):
     if not payload.messages:
         raise HTTPException(status_code=400, detail="messages cannot be empty")
 
-    anthropic_messages = [{"role": m.role, "content": m.content} for m in payload.messages]
+    # NVIDIA's endpoint follows the OpenAI convention of putting the system
+    # prompt as the first message in the list, rather than a separate top
+    # level parameter the way Anthropic's API expects it.
+    chat_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+        {"role": m.role, "content": m.content} for m in payload.messages
+    ]
 
     def event_stream():
         try:
-            with client.messages.stream(
+            stream = client.chat.completions.create(
                 model=MODEL,
                 max_tokens=500,
-                system=SYSTEM_PROMPT,
-                messages=anthropic_messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    yield f"data: {json.dumps({'text': text})}\n\n"
+                messages=chat_messages,
+                stream=True,
+            )
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield f"data: {json.dumps({'text': delta})}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
